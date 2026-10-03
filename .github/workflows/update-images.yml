@@ -2,18 +2,15 @@ name: Auto Generate Images JSON
 
 on:
   push:
-    paths:
-      - '**/*.png'
-      - '**/*.jpg'
-      - '**/*.jpeg'
-      - '**/*.webp'
 
 jobs:
   build:
-  name: Generate Image List JSON
+    name: Generate Image List JSON
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -24,39 +21,70 @@ jobs:
           import os
           import json
 
-          # 要扫描的套组文件夹名（对应你的 6 个文件夹）
-          folders = [
-              "cyber-violet-ticket",
-              "cobalt-street-cozy",
-              "pastel-ribbon-girls",
-              "Sleep-Tight",
-              "Do_You_Even_DJ",
-              "glossy-clay-crt"
-          ]
-
+          # 自动扫描整个仓库
+          # 找到所有包含图片的文件夹
           result = {}
-          for folder in folders:
-              if os.path.exists(folder) and os.path.isdir(folder):
-                  # 获取文件夹内所有常见图片格式
-                  files = [
-                      f for f in os.listdir(folder)
-                      if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))
-                  ]
-                  files.sort()  # 按文件名排序
-                  result[folder] = files
-              else:
-                  result[folder] = []
 
-          # 写入根目录的 images.json
+          image_extensions = (
+              '.png',
+              '.jpg',
+              '.jpeg',
+              '.webp'
+          )
+
+          for root, dirs, files in os.walk('.'):
+              # 跳过 GitHub Actions 自身目录
+              dirs[:] = [
+                  d for d in dirs
+                  if d != '.git'
+              ]
+
+              image_files = [
+                  f for f in files
+                  if f.lower().endswith(image_extensions)
+              ]
+
+              # 当前文件夹没有图片就跳过
+              if not image_files:
+                  continue
+
+              # 转换成相对于仓库根目录的路径
+              folder = os.path.relpath(root, '.')
+
+              # 根目录图片使用 "." 作为文件夹名称
+              if folder == '.':
+                  folder = ''
+
+              image_files.sort()
+
+              result[folder] = image_files
+
+          # 文件夹名称排序
+          result = dict(sorted(result.items()))
+
+          # 写入根目录 images.json
           with open("images.json", "w", encoding="utf-8") as f:
-              json.dump(result, f, ensure_ascii=False, indent=2)
+              json.dump(
+                  result,
+                  f,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
           print("images.json generated successfully!")
+
           EOF
 
       - name: Commit and Push if changed
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
           git add images.json
-          git diff --staged --quiet || git commit -m "chore: auto-update images.json"
-          git push
+
+          if git diff --staged --quiet; then
+            echo "No changes to images.json"
+          else
+            git commit -m "chore: auto-update images.json"
+            git push
+          fi
