@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Generate JSON
         run: |
@@ -40,7 +40,8 @@ jobs:
               ]
 
               image_files = [
-                  f for f in files
+                  f
+                  for f in files
                   if f.lower().endswith(image_extensions)
               ]
 
@@ -51,7 +52,7 @@ jobs:
               # 转换成相对于仓库根目录的路径
               folder = os.path.relpath(root, '.')
 
-              # 根目录图片使用 "." 作为文件夹名称
+              # 根目录图片使用空字符串作为文件夹名称
               if folder == '.':
                   folder = ''
 
@@ -72,7 +73,6 @@ jobs:
               )
 
           print("images.json generated successfully!")
-
           EOF
 
       - name: Commit and Push if changed
