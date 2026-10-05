@@ -1,11 +1,18 @@
-name: Auto Generate Images JSON
+name: Auto Renumber Images, Update JSON and Purge CDN
 
 on:
   push:
+    paths:
+      - '/*.png'
+      - '/.jpg'
+      - '/.jpeg'
+      - '/*.webp'
+      - '.github/workflows/update-images.yml'
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Generate Image List JSON
+    name: Renumber Images & Sync CDN Cache
     runs-on: ubuntu-latest
 
     permissions:
@@ -13,31 +20,35 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      - name: Generate JSON
+      - name: Renumber, Generate JSON and Purge Cache
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           python3 - << 'EOF'
           import os
+          import re
           import json
+          import urllib.request
 
-          # 自动扫描整个仓库
-          # 找到所有包含图片的文件夹
+          image_extensions = ('.png', '.jpg', '.jpeg', '.webp')
+
+          # 自然语言与数字混排排序：
+          # 确保 card-1, card-2, card-10, card-99 严格按数字大小排序
+          def natural_sort_key(s):
+              return [
+                  int(text) if text.isdigit() else text.lower()
+                  for text in re.split(r'(\d+)', s)
+              ]
+
           result = {}
-
-          image_extensions = (
-              '.png',
-              '.jpg',
-              '.jpeg',
-              '.webp'
-          )
+          changed_files_for_purge = []
 
           for root, dirs, files in os.walk('.'):
-              # 跳过 GitHub Actions 自身目录
-              dirs[:] = [
-                  d for d in dirs
-                  if d != '.git'
-              ]
+              # 忽略系统隐藏目录及 GitHub 配置目录
+              dirs[:] = [d for d in dirs if not d.startswith('.')]
 
               image_files = [
                   f
@@ -45,25 +56,89 @@ jobs:
                   if f.lower().endswith(image_extensions)
               ]
 
-              # 当前文件夹没有图片就跳过
               if not image_files:
                   continue
 
-              # 转换成相对于仓库根目录的路径
               folder = os.path.relpath(root, '.')
 
-              # 根目录图片使用空字符串作为文件夹名称
               if folder == '.':
                   folder = ''
 
-              image_files.sort()
+              # 按照文件自然数字顺序进行排序
+              image_files.sort(key=natural_sort_key)
 
-              result[folder] = image_files
+              total_count = len(image_files)
 
-          # 文件夹名称排序
+              # 自动补零位数：
+              # 100 张以内自动补 2 位
+              # 超过 100 张自动扩展为 3 位
+              pad_len = max(2, len(str(total_count)))
+
+              needs_rename = False
+              target_names = []
+
+              for i, original_name in enumerate(image_files, start=1):
+                  ext = os.path.splitext(original_name)[1].lower()
+                  target_name = f"card-{i:0{pad_len}d}{ext}"
+
+                  target_names.append(target_name)
+
+                  if original_name != target_name:
+                      needs_rename = True
+
+              # 采用“两阶段无碰撞重命名”
+              if needs_rename:
+                  temp_renames = []
+
+                  for i, original_name in enumerate(image_files, start=1):
+                      ext = os.path.splitext(original_name)[1].lower()
+                      target_name = target_names[i - 1]
+
+                      temp_name = (
+                          f"_tmp_ren{i}_{ext.strip('.')}" + ext
+                      )
+
+                      temp_renames.append(
+                          (original_name, temp_name, target_name)
+                      )
+
+                  # 阶段 1：全部重命名为中转临时名
+                  for orig, tmp, _ in temp_renames:
+                      os.rename(
+                          os.path.join(root, orig),
+                          os.path.join(root, tmp)
+                      )
+
+                  # 阶段 2：重命名为目标连续文件名
+                  final_files = []
+
+                  for _, tmp, target in temp_renames:
+                      os.rename(
+                          os.path.join(root, tmp),
+                          os.path.join(root, target)
+                      )
+
+                      final_files.append(target)
+
+                      rel_target = (
+                          os.path.join(folder, target)
+                          if folder
+                          else target
+                      )
+
+                      changed_files_for_purge.append(
+                          rel_target.replace('\\', '/')
+                      )
+
+                  result[folder] = final_files
+
+              else:
+                  result[folder] = image_files
+
+          # 按文件夹名称进行字母升序排序
           result = dict(sorted(result.items()))
 
-          # 写入根目录 images.json
+          # 写入根目录的 images.json
           with open("images.json", "w", encoding="utf-8") as f:
               json.dump(
                   result,
@@ -72,7 +147,48 @@ jobs:
                   indent=2
               )
 
-          print("images.json generated successfully!")
+          print(
+              "Renumbering complete and images.json generated successfully!"
+          )
+
+          # 调用 jsDelivr Purge API 即时刷新 CDN 节点缓存
+          repo = os.environ.get('GITHUB_REPOSITORY', '')
+          branch = os.environ.get('GITHUB_REF_NAME', 'main')
+
+          if repo:
+              purge_targets = (
+                  ['images.json']
+                  + changed_files_for_purge[:40]
+              )
+
+              for target in purge_targets:
+                  purge_url = (
+                      f"https://purge.jsdelivr.net/gh/"
+                      f"{repo}@{branch}/{target}"
+                  )
+
+                  try:
+                      req = urllib.request.Request(
+                          purge_url,
+                          headers={
+                              'User-Agent': 'GitHub-Actions-Purge'
+                          }
+                      )
+
+                      with urllib.request.urlopen(
+                          req,
+                          timeout=6
+                      ) as resp:
+                          print(
+                              f"CDN Cache Purged: "
+                              f"{target} (Status: {resp.status})"
+                          )
+
+                  except Exception as e:
+                      print(
+                          f"Purge notice for {target}: {e}"
+                      )
+
           EOF
 
       - name: Commit and Push if changed
@@ -80,11 +196,12 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add images.json
+          # 暂存所有重命名后的图片以及 images.json
+          git add -A
 
           if git diff --staged --quiet; then
-            echo "No changes to images.json"
+            echo "No file changes detected, skipping commit."
           else
-            git commit -m "chore: auto-update images.json"
+            git commit -m "chore: auto-renumber images, update images.json and purge cdn [skip ci]"
             git push
           fi
