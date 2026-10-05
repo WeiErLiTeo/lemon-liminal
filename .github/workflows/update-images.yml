@@ -1,4 +1,4 @@
-name: 上传与裁切
+name: 命名与裁切
 
 on:
   push:
@@ -18,23 +18,18 @@ jobs:
       contents: write
 
     steps:
-      # STREAMING_CHUNK:Checking out repository source code...
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # STREAMING_CHUNK:Setting up Python runtime environment...
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
-      # STREAMING_CHUNK:Installing imaging dependencies...
       - name: Install Pillow Imaging Library
         run: |
           pip install --upgrade Pillow
 
-      # STREAMING_CHUNK:Processing images and generating metadata...
       - name: Crop, Convert WebP and Sync JSON
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -81,19 +76,11 @@ jobs:
                   # 视网膜超清标准宽度约束（最高 1440px，避免多余显存损耗）
                   if cropped_im.width > MAX_WIDTH:
                       target_h = int(round(MAX_WIDTH / TARGET_RATIO))
-                      cropped_im = cropped_im.resize(
-                          (MAX_WIDTH, target_h),
-                          Image.Resampling.LANCZOS
-                      )
+                      cropped_im = cropped_im.resize((MAX_WIDTH, target_h), Image.Resampling.LANCZOS)
 
                   # 确保目标目录存在
                   os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                  cropped_im.save(
-                      dest_path,
-                      'WEBP',
-                      quality=WEBP_QUALITY,
-                      method=6
-                  )
+                  cropped_im.save(dest_path, 'WEBP', quality=WEBP_QUALITY, method=6)
 
           result = {}
           purges = []
@@ -140,9 +127,7 @@ jobs:
                   subfolder_dest = os.path.join(img_subfolder, final_webp_name)
                   shutil.copy2(temp_webp_path, subfolder_dest)
 
-                  temp_entries.append(
-                      (orig_path, temp_webp_path, final_webp_name)
-                  )
+                  temp_entries.append((orig_path, temp_webp_path, final_webp_name))
 
               # 第二阶段：清除旧原图并将规整后的 WebP 移至当前套组根部（确保前端直连）
               for orig_path, temp_webp_path, final_webp_name in temp_entries:
@@ -162,7 +147,7 @@ jobs:
           with open("images.json", "w", encoding="utf-8") as f:
               json.dump(result, f, ensure_ascii=False, indent=2)
 
-          # STREAMING_CHUNK:Purging jsDelivr CDN edge caches...
+          # Purging jsDelivr CDN edge caches...
           repo = os.environ.get('GITHUB_REPOSITORY', '')
           branch = os.environ.get('GITHUB_REF_NAME', 'main')
 
@@ -180,7 +165,6 @@ jobs:
                       pass
           EOF
 
-      # STREAMING_CHUNK:Committing and pushing optimized assets...
       - name: Commit and Push Changes
         run: |
           git config --global user.name "github-actions[bot]"
