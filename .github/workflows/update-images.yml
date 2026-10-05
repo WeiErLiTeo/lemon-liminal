@@ -1,28 +1,41 @@
-name: Auto Renumber Images, Update JSON and Purge CDN
+name: 上传与裁切
 
 on:
   push:
     paths:
       - '/*.png'
-      - '/.jpg'
-      - '/.jpeg'
+      - '/*.jpg'
+      - '/*.jpeg'
       - '/*.webp'
       - '.github/workflows/update-images.yml'
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Renumber Images & Sync CDN Cache
+  optimize_and_sync:
+    name: Crop, Convert & Renumber
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
 
     steps:
+      # STREAMING_CHUNK:Checking out repository source code...
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Renumber, Generate JSON and Purge Cache
+      # STREAMING_CHUNK:Setting up Python runtime environment...
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # STREAMING_CHUNK:Installing imaging dependencies...
+      - name: Install Pillow Imaging Library
+        run: |
+          pip install --upgrade Pillow
+
+      # STREAMING_CHUNK:Processing images and generating metadata...
+      - name: Crop, Convert WebP and Sync JSON
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -31,177 +44,153 @@ jobs:
           import os
           import re
           import json
+          import shutil
           import urllib.request
+          from PIL import Image
 
-          image_extensions = ('.png', '.jpg', '.jpeg', '.webp')
+          img_exts = ('.png', '.jpg', '.jpeg', '.webp')
+          TARGET_RATIO = 16.0 / 9.0
+          MAX_WIDTH = 1440
+          WEBP_QUALITY = 92
 
-          # 自然语言与数字混排排序：
-          # 确保 card-1, card-2, card-10, card-99 严格按数字大小排序
           def natural_sort_key(s):
-              return [
-                  int(text) if text.isdigit() else text.lower()
-                  for text in re.split(r'(\d+)', s)
-              ]
+              return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
+
+          def process_image(src_path, dest_path):
+              """智能 16:9 居中裁切并输出视网膜级高质量 WebP"""
+              with Image.open(src_path) as im:
+                  # 保证色彩通道兼容 WebP
+                  if im.mode not in ('RGB', 'RGBA'):
+                      im = im.convert('RGBA')
+
+                  w, h = im.size
+                  current_ratio = w / float(h)
+
+                  # 16:9 智能居中裁切（彻底去除黑边与畸变）
+                  if current_ratio > TARGET_RATIO:
+                      new_w = int(round(h * TARGET_RATIO))
+                      left = (w - new_w) // 2
+                      box = (left, 0, left + new_w, h)
+                  else:
+                      new_h = int(round(w / TARGET_RATIO))
+                      top = (h - new_h) // 2
+                      box = (0, top, w, top + new_h)
+
+                  cropped_im = im.crop(box)
+
+                  # 视网膜超清标准宽度约束（最高 1440px，避免多余显存损耗）
+                  if cropped_im.width > MAX_WIDTH:
+                      target_h = int(round(MAX_WIDTH / TARGET_RATIO))
+                      cropped_im = cropped_im.resize(
+                          (MAX_WIDTH, target_h),
+                          Image.Resampling.LANCZOS
+                      )
+
+                  # 确保目标目录存在
+                  os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                  cropped_im.save(
+                      dest_path,
+                      'WEBP',
+                      quality=WEBP_QUALITY,
+                      method=6
+                  )
 
           result = {}
-          changed_files_for_purge = []
+          purges = []
 
+          # 遍历仓库中的所有视觉套组文件夹
           for root, dirs, files in os.walk('.'):
-              # 忽略系统隐藏目录及 GitHub 配置目录
-              dirs[:] = [d for d in dirs if not d.startswith('.')]
-
-              image_files = [
-                  f
-                  for f in files
-                  if f.lower().endswith(image_extensions)
+              # 忽略系统隐藏目录及脚本生成的单图子文件夹，避免递归污染
+              dirs[:] = [
+                  d for d in dirs
+                  if not d.startswith('.')
+                  and not re.match(r'^card-\d+$', d)
+                  and d != 'temp'
               ]
 
-              if not image_files:
+              # 筛选当前目录下的直接图片文件
+              imgs = [f for f in files if f.lower().endswith(img_exts)]
+              if not imgs:
                   continue
 
               folder = os.path.relpath(root, '.')
-
               if folder == '.':
-                  folder = ''
+                  continue
 
-              # 按照文件自然数字顺序进行排序
-              image_files.sort(key=natural_sort_key)
+              imgs.sort(key=natural_sort_key)
+              pad = max(2, len(str(len(imgs))))
 
-              total_count = len(image_files)
+              final_names = []
+              temp_entries = []
 
-              # 自动补零位数：
-              # 100 张以内自动补 2 位
-              # 超过 100 张自动扩展为 3 位
-              pad_len = max(2, len(str(total_count)))
+              # 第一阶段：按序规整命名，并执行智能裁剪与 WebP 高质转码
+              for idx, orig_file in enumerate(imgs, start=1):
+                  base_name = f"card-{idx:0{pad}d}"
+                  final_webp_name = f"{base_name}.webp"
+                  final_names.append(final_webp_name)
 
-              needs_rename = False
-              target_names = []
+                  orig_path = os.path.join(root, orig_file)
+                  temp_webp_path = os.path.join(root, f"_temp{idx}.webp")
 
-              for i, original_name in enumerate(image_files, start=1):
-                  ext = os.path.splitext(original_name)[1].lower()
-                  target_name = f"card-{i:0{pad_len}d}{ext}"
+                  # 云端裁切并转码为高质量 WebP
+                  process_image(orig_path, temp_webp_path)
 
-                  target_names.append(target_name)
+                  # 同时在当前图片文件夹下新建与当前图片同名的文件夹，存放裁剪副本
+                  img_subfolder = os.path.join(root, base_name)
+                  subfolder_dest = os.path.join(img_subfolder, final_webp_name)
+                  shutil.copy2(temp_webp_path, subfolder_dest)
 
-                  if original_name != target_name:
-                      needs_rename = True
+                  temp_entries.append(
+                      (orig_path, temp_webp_path, final_webp_name)
+                  )
 
-              # 采用“两阶段无碰撞重命名”
-              if needs_rename:
-                  temp_renames = []
+              # 第二阶段：清除旧原图并将规整后的 WebP 移至当前套组根部（确保前端直连）
+              for orig_path, temp_webp_path, final_webp_name in temp_entries:
+                  if os.path.exists(orig_path):
+                      os.remove(orig_path)
 
-                  for i, original_name in enumerate(image_files, start=1):
-                      ext = os.path.splitext(original_name)[1].lower()
-                      target_name = target_names[i - 1]
+                  final_dest = os.path.join(root, final_webp_name)
+                  os.rename(temp_webp_path, final_dest)
 
-                      temp_name = (
-                          f"_tmp_ren{i}_{ext.strip('.')}" + ext
-                      )
+                  rel_path = os.path.join(folder, final_webp_name)
+                  purges.append(rel_path.replace('\\', '/'))
 
-                      temp_renames.append(
-                          (original_name, temp_name, target_name)
-                      )
+              result[folder] = final_names
 
-                  # 阶段 1：全部重命名为中转临时名
-                  for orig, tmp, _ in temp_renames:
-                      os.rename(
-                          os.path.join(root, orig),
-                          os.path.join(root, tmp)
-                      )
-
-                  # 阶段 2：重命名为目标连续文件名
-                  final_files = []
-
-                  for _, tmp, target in temp_renames:
-                      os.rename(
-                          os.path.join(root, tmp),
-                          os.path.join(root, target)
-                      )
-
-                      final_files.append(target)
-
-                      rel_target = (
-                          os.path.join(folder, target)
-                          if folder
-                          else target
-                      )
-
-                      changed_files_for_purge.append(
-                          rel_target.replace('\\', '/')
-                      )
-
-                  result[folder] = final_files
-
-              else:
-                  result[folder] = image_files
-
-          # 按文件夹名称进行字母升序排序
+          # 格式化排序写入 images.json 清单
           result = dict(sorted(result.items()))
-
-          # 写入根目录的 images.json
           with open("images.json", "w", encoding="utf-8") as f:
-              json.dump(
-                  result,
-                  f,
-                  ensure_ascii=False,
-                  indent=2
-              )
+              json.dump(result, f, ensure_ascii=False, indent=2)
 
-          print(
-              "Renumbering complete and images.json generated successfully!"
-          )
-
-          # 调用 jsDelivr Purge API 即时刷新 CDN 节点缓存
+          # STREAMING_CHUNK:Purging jsDelivr CDN edge caches...
           repo = os.environ.get('GITHUB_REPOSITORY', '')
           branch = os.environ.get('GITHUB_REF_NAME', 'main')
 
           if repo:
-              purge_targets = (
-                  ['images.json']
-                  + changed_files_for_purge[:40]
-              )
-
-              for target in purge_targets:
-                  purge_url = (
-                      f"https://purge.jsdelivr.net/gh/"
-                      f"{repo}@{branch}/{target}"
-                  )
+              for item in ['images.json'] + purges[:35]:
+                  url = f"https://purge.jsdelivr.net/gh/{repo}@{branch}/{item}"
 
                   try:
                       req = urllib.request.Request(
-                          purge_url,
-                          headers={
-                              'User-Agent': 'GitHub-Actions-Purge'
-                          }
+                          url,
+                          headers={'User-Agent': 'Mozilla/5.0'}
                       )
-
-                      with urllib.request.urlopen(
-                          req,
-                          timeout=6
-                      ) as resp:
-                          print(
-                              f"CDN Cache Purged: "
-                              f"{target} (Status: {resp.status})"
-                          )
-
-                  except Exception as e:
-                      print(
-                          f"Purge notice for {target}: {e}"
-                      )
-
+                      urllib.request.urlopen(req, timeout=5)
+                  except Exception:
+                      pass
           EOF
 
-      - name: Commit and Push if changed
+      # STREAMING_CHUNK:Committing and pushing optimized assets...
+      - name: Commit and Push Changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # 暂存所有重命名后的图片以及 images.json
           git add -A
 
           if git diff --staged --quiet; then
-            echo "No file changes detected, skipping commit."
+            echo "No changes to commit"
           else
-            git commit -m "chore: auto-renumber images, update images.json and purge cdn [skip ci]"
+            git commit -m "chore: auto crop 16:9, convert WebP and sync images.json [skip ci]"
             git push
           fi
