@@ -1,18 +1,17 @@
-name: 命名与裁切
+name: Auto Crop 16:9 WebP to Suite Subfolder
 
 on:
   push:
     paths:
-      - '/*.png'
-      - '/*.jpg'
-      - '/*.jpeg'
-      - '/*.webp'
+      - '**/*.png'
+      - '**/*.jpg'
+      - '**/*.jpeg'
       - '.github/workflows/update-images.yml'
   workflow_dispatch:
 
 jobs:
   optimize_and_sync:
-    name: Crop, Convert & Renumber
+    name: Crop & Archive
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -30,7 +29,7 @@ jobs:
         run: |
           pip install --upgrade Pillow
 
-      - name: Crop, Convert WebP and Sync JSON
+      - name: Process Images to Nested Suite Subfolder
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -43,7 +42,7 @@ jobs:
           import urllib.request
           from PIL import Image
 
-          img_exts = ('.png', '.jpg', '.jpeg', '.webp')
+          img_exts = ('.png', '.jpg', '.jpeg')
           TARGET_RATIO = 16.0 / 9.0
           MAX_WIDTH = 1440
           WEBP_QUALITY = 92
@@ -54,14 +53,12 @@ jobs:
           def process_image(src_path, dest_path):
               """智能 16:9 居中裁切并输出视网膜级高质量 WebP"""
               with Image.open(src_path) as im:
-                  # 保证色彩通道兼容 WebP
                   if im.mode not in ('RGB', 'RGBA'):
                       im = im.convert('RGBA')
 
                   w, h = im.size
                   current_ratio = w / float(h)
 
-                  # 16:9 智能居中裁切（彻底去除黑边与畸变）
                   if current_ratio > TARGET_RATIO:
                       new_w = int(round(h * TARGET_RATIO))
                       left = (w - new_w) // 2
@@ -73,93 +70,93 @@ jobs:
 
                   cropped_im = im.crop(box)
 
-                  # 视网膜超清标准宽度约束（最高 1440px，避免多余显存损耗）
                   if cropped_im.width > MAX_WIDTH:
                       target_h = int(round(MAX_WIDTH / TARGET_RATIO))
                       cropped_im = cropped_im.resize((MAX_WIDTH, target_h), Image.Resampling.LANCZOS)
 
-                  # 确保目标目录存在
                   os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                   cropped_im.save(dest_path, 'WEBP', quality=WEBP_QUALITY, method=6)
 
           result = {}
           purges = []
+          repo_root = '.'
 
-          # 遍历仓库中的所有视觉套组文件夹
-          for root, dirs, files in os.walk('.'):
-              # 忽略系统隐藏目录及脚本生成的单图子文件夹，避免递归污染
-              dirs[:] = [
-                  d for d in dirs
-                  if not d.startswith('.')
-                  and not re.match(r'^card-\d+$', d)
-                  and d != 'temp'
+          # 仅获取仓库根目录下的各套组一级文件夹，绝不跨套组全局乱抓
+          suite_dirs = [
+              d for d in os.listdir(repo_root)
+              if os.path.isdir(os.path.join(repo_root, d))
+              and not d.startswith('.')
+              and not d.startswith('__')
+          ]
+          suite_dirs.sort(key=natural_sort_key)
+
+          for suite_name in suite_dirs:
+              suite_dir = os.path.join(repo_root, suite_name)
+              sub_archive_dir = os.path.join(suite_dir, suite_name)
+
+              # 扫描当前套组同级根目录下的 PNG 原图（排除 webp 文件）
+              imgs = [
+                  f for f in os.listdir(suite_dir)
+                  if os.path.isfile(os.path.join(suite_dir, f))
+                  and f.lower().endswith(img_exts)
+                  and not f.startswith('__')
               ]
 
-              # 筛选当前目录下的直接图片文件
-              imgs = [f for f in files if f.lower().endswith(img_exts)]
-              if not imgs:
-                  continue
+              # 容错机制：若原图被意外置于二级同名子文件夹内，自动回正至套组根目录
+              if not imgs and os.path.isdir(sub_archive_dir):
+                  nested_imgs = [
+                      f for f in os.listdir(sub_archive_dir)
+                      if os.path.isfile(os.path.join(sub_archive_dir, f))
+                      and f.lower().endswith(img_exts)
+                      and not f.startswith('__')
+                  ]
+                  if nested_imgs:
+                      for f in nested_imgs:
+                          shutil.move(os.path.join(sub_archive_dir, f), os.path.join(suite_dir, f))
+                      imgs = nested_imgs
 
-              folder = os.path.relpath(root, '.')
-              if folder == '.':
+              if not imgs:
                   continue
 
               imgs.sort(key=natural_sort_key)
               pad = max(2, len(str(len(imgs))))
 
-              final_names = []
-              temp_entries = []
+              # 确保在当前套组下创建二级同名子目录：如 Broadcasting-Room/Broadcasting-Room/
+              os.makedirs(sub_archive_dir, exist_ok=True)
 
-              # 第一阶段：按序规整命名，并执行智能裁剪与 WebP 高质转码
+              webp_names = []
               for idx, orig_file in enumerate(imgs, start=1):
-                  base_name = f"card-{idx:0{pad}d}"
-                  final_webp_name = f"{base_name}.webp"
-                  final_names.append(final_webp_name)
+                  base_name = f"card-{idx:0{pad}d}.webp"
+                  webp_names.append(base_name)
 
-                  orig_path = os.path.join(root, orig_file)
-                  temp_webp_path = os.path.join(root, f"_temp{idx}.webp")
+                  orig_png_path = os.path.join(suite_dir, orig_file)
 
-                  # 云端裁切并转码为高质量 WebP
-                  process_image(orig_path, temp_webp_path)
+                  # 1. 目标归档：保存至二级同名子文件夹内 (Broadcasting-Room/Broadcasting-Room/card-01.webp)
+                  nested_dest_webp = os.path.join(sub_archive_dir, base_name)
+                  process_image(orig_png_path, nested_dest_webp)
 
-                  # 同时在当前图片文件夹下新建与当前图片同名的文件夹，存放裁剪副本
-                  img_subfolder = os.path.join(root, base_name)
-                  subfolder_dest = os.path.join(img_subfolder, final_webp_name)
-                  shutil.copy2(temp_webp_path, subfolder_dest)
+                  # 2. 根部镜像：在套组根目录同步保留一份 WebP，保障前端 CDN 直连零 404
+                  root_dest_webp = os.path.join(suite_dir, base_name)
+                  shutil.copy2(nested_dest_webp, root_dest_webp)
 
-                  temp_entries.append((orig_path, temp_webp_path, final_webp_name))
+                  purges.append(f"{suite_name}/{base_name}")
+                  purges.append(f"{suite_name}/{suite_name}/{base_name}")
 
-              # 第二阶段：清除旧原图并将规整后的 WebP 移至当前套组根部（确保前端直连）
-              for orig_path, temp_webp_path, final_webp_name in temp_entries:
-                  if os.path.exists(orig_path):
-                      os.remove(orig_path)
-
-                  final_dest = os.path.join(root, final_webp_name)
-                  os.rename(temp_webp_path, final_dest)
-
-                  rel_path = os.path.join(folder, final_webp_name)
-                  purges.append(rel_path.replace('\\', '/'))
-
-              result[folder] = final_names
+              # images.json 维护当前套组标准文件列表
+              result[suite_name] = webp_names
 
           # 格式化排序写入 images.json 清单
           result = dict(sorted(result.items()))
           with open("images.json", "w", encoding="utf-8") as f:
               json.dump(result, f, ensure_ascii=False, indent=2)
 
-          # Purging jsDelivr CDN edge caches...
           repo = os.environ.get('GITHUB_REPOSITORY', '')
           branch = os.environ.get('GITHUB_REF_NAME', 'main')
-
           if repo:
               for item in ['images.json'] + purges[:35]:
                   url = f"https://purge.jsdelivr.net/gh/{repo}@{branch}/{item}"
-
                   try:
-                      req = urllib.request.Request(
-                          url,
-                          headers={'User-Agent': 'Mozilla/5.0'}
-                      )
+                      req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                       urllib.request.urlopen(req, timeout=5)
                   except Exception:
                       pass
@@ -169,12 +166,10 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
           git add -A
-
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: auto crop 16:9, convert WebP and sync images.json [skip ci]"
+            git commit -m "chore: crop 16:9 WebP to nested suite folder & sync images.json [skip ci]"
             git push
           fi
