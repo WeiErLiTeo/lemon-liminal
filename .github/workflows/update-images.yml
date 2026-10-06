@@ -73,6 +73,15 @@ jobs:
               suite_dir = os.path.join(repo_root, suite_name)
               sub_archive_dir = os.path.join(suite_dir, suite_name)
 
+              # 清理残留的旧同级 webp 与旧 card-xx 目录
+              for item in os.listdir(suite_dir):
+                  item_path = os.path.join(suite_dir, item)
+                  if item != suite_name and os.path.isdir(item_path) and re.match(r'^card-\d+$', item):
+                      shutil.rmtree(item_path, ignore_errors=True)
+                  elif os.path.isfile(item_path) and item.lower().endswith('.webp'):
+                      os.remove(item_path)
+
+              # 扫描图片原图
               imgs = [
                   f for f in os.listdir(suite_dir)
                   if os.path.isfile(os.path.join(suite_dir, f))
@@ -106,19 +115,14 @@ jobs:
                   webp_names.append(base_name)
 
                   orig_png_path = os.path.join(suite_dir, orig_file)
-
-                  # 归档到二级同名目录
                   nested_dest_webp = os.path.join(sub_archive_dir, base_name)
                   process_image(orig_png_path, nested_dest_webp)
 
-                  # 根目录镜像
-                  root_dest_webp = os.path.join(suite_dir, base_name)
-                  shutil.copy2(nested_dest_webp, root_dest_webp)
-
-                  purges.append(f"{suite_name}/{base_name}")
                   purges.append(f"{suite_name}/{suite_name}/{base_name}")
 
-              result[suite_name] = webp_names
+              # key 设置为二级目录路径，value 仅为纯文件名列表
+              json_key = f"{suite_name}/{suite_name}"
+              result[json_key] = webp_names
 
           result = dict(sorted(result.items()))
           with open("images.json", "w", encoding="utf-8") as f:
@@ -144,6 +148,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: convert WebP to suite folder & sync images.json [skip ci]"
+            git commit -m "chore: update images.json suite keys and convert webp [skip ci]"
             git push
           fi
