@@ -1,10 +1,11 @@
-name: Auto Crop, Convert WebP and Sync Images
+name: 命名与裁切
+
 on:
   push:
     paths:
       - '/*.png'
-      - '/.jpg'
-      - '/.jpeg'
+      - '/*.jpg'
+      - '/*.jpeg'
       - '/*.webp'
       - '.github/workflows/update-images.yml'
   workflow_dispatch:
@@ -53,12 +54,14 @@ jobs:
           def process_image(src_path, dest_path):
               """智能 16:9 居中裁切并输出视网膜级高质量 WebP"""
               with Image.open(src_path) as im:
+                  # 保证色彩通道兼容 WebP
                   if im.mode not in ('RGB', 'RGBA'):
                       im = im.convert('RGBA')
 
                   w, h = im.size
                   current_ratio = w / float(h)
 
+                  # 16:9 智能居中裁切（彻底去除黑边与畸变）
                   if current_ratio > TARGET_RATIO:
                       new_w = int(round(h * TARGET_RATIO))
                       left = (w - new_w) // 2
@@ -70,31 +73,30 @@ jobs:
 
                   cropped_im = im.crop(box)
 
+                  # 视网膜超清标准宽度约束（最高 1440px，避免多余显存损耗）
                   if cropped_im.width > MAX_WIDTH:
                       target_h = int(round(MAX_WIDTH / TARGET_RATIO))
                       cropped_im = cropped_im.resize((MAX_WIDTH, target_h), Image.Resampling.LANCZOS)
 
+                  # 确保目标目录存在
                   os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                   cropped_im.save(dest_path, 'WEBP', quality=WEBP_QUALITY, method=6)
 
           result = {}
           purges = []
 
+          # 遍历仓库中的所有视觉套组文件夹
           for root, dirs, files in os.walk('.'):
               # 忽略系统隐藏目录及脚本生成的单图子文件夹，避免递归污染
               dirs[:] = [
                   d for d in dirs
                   if not d.startswith('.')
                   and not re.match(r'^card-\d+$', d)
-                  and not d.startswith('__temp')
+                  and d != 'temp'
               ]
 
-              # 筛选当前目录下的直接图片文件，跳过临时转码中转文件
-              imgs = [
-                  f for f in files
-                  if f.lower().endswith(img_exts)
-                  and not f.startswith('__temp')
-              ]
+              # 筛选当前目录下的直接图片文件
+              imgs = [f for f in files if f.lower().endswith(img_exts)]
               if not imgs:
                   continue
 
@@ -108,6 +110,7 @@ jobs:
               final_names = []
               temp_entries = []
 
+              # 第一阶段：按序规整命名，并执行智能裁剪与 WebP 高质转码
               for idx, orig_file in enumerate(imgs, start=1):
                   base_name = f"card-{idx:0{pad}d}"
                   final_webp_name = f"{base_name}.webp"
@@ -119,36 +122,44 @@ jobs:
                   # 云端裁切并转码为高质量 WebP
                   process_image(orig_path, temp_webp_path)
 
-                  # 确保目标同名子文件夹创建成功后再执行复制
+                  # 同时在当前图片文件夹下新建与当前图片同名的文件夹，存放裁剪副本
                   img_subfolder = os.path.join(root, base_name)
-                  os.makedirs(img_subfolder, exist_ok=True)
                   subfolder_dest = os.path.join(img_subfolder, final_webp_name)
                   shutil.copy2(temp_webp_path, subfolder_dest)
 
                   temp_entries.append((orig_path, temp_webp_path, final_webp_name))
 
+              # 第二阶段：清除旧原图并将规整后的 WebP 移至当前套组根部（确保前端直连）
               for orig_path, temp_webp_path, final_webp_name in temp_entries:
                   if os.path.exists(orig_path):
                       os.remove(orig_path)
+
                   final_dest = os.path.join(root, final_webp_name)
                   os.rename(temp_webp_path, final_dest)
 
-              rel_path = os.path.join(folder, final_webp_name)
-              purges.append(rel_path.replace('\\', '/'))
+                  rel_path = os.path.join(folder, final_webp_name)
+                  purges.append(rel_path.replace('\\', '/'))
 
               result[folder] = final_names
 
+          # 格式化排序写入 images.json 清单
           result = dict(sorted(result.items()))
           with open("images.json", "w", encoding="utf-8") as f:
               json.dump(result, f, ensure_ascii=False, indent=2)
 
+          # Purging jsDelivr CDN edge caches...
           repo = os.environ.get('GITHUB_REPOSITORY', '')
           branch = os.environ.get('GITHUB_REF_NAME', 'main')
+
           if repo:
               for item in ['images.json'] + purges[:35]:
                   url = f"https://purge.jsdelivr.net/gh/{repo}@{branch}/{item}"
+
                   try:
-                      req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                      req = urllib.request.Request(
+                          url,
+                          headers={'User-Agent': 'Mozilla/5.0'}
+                      )
                       urllib.request.urlopen(req, timeout=5)
                   except Exception:
                       pass
@@ -158,7 +169,9 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
           git add -A
+
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
