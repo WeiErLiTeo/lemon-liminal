@@ -1,4 +1,4 @@
-name: Auto Crop 16:9 WebP to Suite Subfolder
+name: Auto Convert WebP to Suite Subfolder
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   optimize_and_sync:
-    name: Crop & Archive
+    name: Convert & Archive
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -43,45 +43,24 @@ jobs:
           from PIL import Image
 
           img_exts = ('.png', '.jpg', '.jpeg')
-          TARGET_RATIO = 16.0 / 9.0
-          MAX_WIDTH = 1440
           WEBP_QUALITY = 92
 
           def natural_sort_key(s):
               return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)]
 
           def process_image(src_path, dest_path):
-              """智能 16:9 居中裁切并输出视网膜级高质量 WebP"""
+              # 保留原图原始分辨率与长宽比，仅转换格式
               with Image.open(src_path) as im:
                   if im.mode not in ('RGB', 'RGBA'):
                       im = im.convert('RGBA')
 
-                  w, h = im.size
-                  current_ratio = w / float(h)
-
-                  if current_ratio > TARGET_RATIO:
-                      new_w = int(round(h * TARGET_RATIO))
-                      left = (w - new_w) // 2
-                      box = (left, 0, left + new_w, h)
-                  else:
-                      new_h = int(round(w / TARGET_RATIO))
-                      top = (h - new_h) // 2
-                      box = (0, top, w, top + new_h)
-
-                  cropped_im = im.crop(box)
-
-                  if cropped_im.width > MAX_WIDTH:
-                      target_h = int(round(MAX_WIDTH / TARGET_RATIO))
-                      cropped_im = cropped_im.resize((MAX_WIDTH, target_h), Image.Resampling.LANCZOS)
-
                   os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                  cropped_im.save(dest_path, 'WEBP', quality=WEBP_QUALITY, method=6)
+                  im.save(dest_path, 'WEBP', quality=WEBP_QUALITY, method=6)
 
           result = {}
           purges = []
           repo_root = '.'
 
-          # 仅获取仓库根目录下的各套组一级文件夹，绝不跨套组全局乱抓
           suite_dirs = [
               d for d in os.listdir(repo_root)
               if os.path.isdir(os.path.join(repo_root, d))
@@ -94,7 +73,6 @@ jobs:
               suite_dir = os.path.join(repo_root, suite_name)
               sub_archive_dir = os.path.join(suite_dir, suite_name)
 
-              # 扫描当前套组同级根目录下的 PNG 原图（排除 webp 文件）
               imgs = [
                   f for f in os.listdir(suite_dir)
                   if os.path.isfile(os.path.join(suite_dir, f))
@@ -102,7 +80,6 @@ jobs:
                   and not f.startswith('__')
               ]
 
-              # 容错机制：若原图被意外置于二级同名子文件夹内，自动回正至套组根目录
               if not imgs and os.path.isdir(sub_archive_dir):
                   nested_imgs = [
                       f for f in os.listdir(sub_archive_dir)
@@ -121,7 +98,6 @@ jobs:
               imgs.sort(key=natural_sort_key)
               pad = max(2, len(str(len(imgs))))
 
-              # 确保在当前套组下创建二级同名子目录：如 Broadcasting-Room/Broadcasting-Room/
               os.makedirs(sub_archive_dir, exist_ok=True)
 
               webp_names = []
@@ -131,21 +107,19 @@ jobs:
 
                   orig_png_path = os.path.join(suite_dir, orig_file)
 
-                  # 1. 目标归档：保存至二级同名子文件夹内 (Broadcasting-Room/Broadcasting-Room/card-01.webp)
+                  # 归档到二级同名目录
                   nested_dest_webp = os.path.join(sub_archive_dir, base_name)
                   process_image(orig_png_path, nested_dest_webp)
 
-                  # 2. 根部镜像：在套组根目录同步保留一份 WebP，保障前端 CDN 直连零 404
+                  # 根目录镜像
                   root_dest_webp = os.path.join(suite_dir, base_name)
                   shutil.copy2(nested_dest_webp, root_dest_webp)
 
                   purges.append(f"{suite_name}/{base_name}")
                   purges.append(f"{suite_name}/{suite_name}/{base_name}")
 
-              # images.json 维护当前套组标准文件列表
               result[suite_name] = webp_names
 
-          # 格式化排序写入 images.json 清单
           result = dict(sorted(result.items()))
           with open("images.json", "w", encoding="utf-8") as f:
               json.dump(result, f, ensure_ascii=False, indent=2)
@@ -170,6 +144,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "chore: crop 16:9 WebP to nested suite folder & sync images.json [skip ci]"
+            git commit -m "chore: convert WebP to suite folder & sync images.json [skip ci]"
             git push
           fi
