@@ -1,26 +1,3 @@
-name: Rollback to Commit
-
-on:
-  workflow_dispatch:
-    inputs:
-      target_commit:
-        description: 'Target Commit SHA'
-        required: true
-        default: 'c5668c3'
-
-jobs:
-  reset_to_commit:
-    name: Revert to Commit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Overwrite to Target Commit
         run: |
           git config --global user.name "github-actions[bot]"
@@ -29,16 +6,14 @@ jobs:
           # 签出主分支
           git checkout ${{ github.ref_name }}
 
-          # 强制把工作区所有文件还原到指定提交的内容
+          # 仅把所有图片、代码和数据文件还原（不碰 .github 工作流配置，规避权限封锁）
           git checkout ${{ github.event.inputs.target_commit }} -- .
+          git checkout HEAD -- .github
 
-          # 清理掉目标提交之后新增加的无用文件与空目录
-          git clean -fd
+          # 清理目标版本后多出的孤儿文件（但保留 .github）
+          git clean -fd -e .github
 
-          # 提交变更并正常推送（无需强推）
-          git commit -m "revert: rollback files to ${{ github.event.inputs.target_commit }} [skip ci]" || echo "No changes"
+          # 正常提交并推送
+          git add -A
+          git commit -m "revert: rollback images and data to ${{ github.event.inputs.target_commit }} [skip ci]" || echo "No changes"
           git push origin ${{ github.ref_name }}
-
-      - name: Purge CDN Cache for images.json
-        run: |
-          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@${{ github.ref_name }}/images.json" || true
