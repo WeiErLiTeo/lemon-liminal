@@ -1,0 +1,41 @@
+name: Rollback to Commit
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: 'Target Commit SHA (回滚的目标版本号)'
+        required: true
+        default: 'c5668c3'
+
+jobs:
+  reset_to_commit:
+    name: Force Reset Branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Hard Reset and Force Push
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 签出当前分支
+          git checkout ${{ github.ref_name }}
+
+          # 强制将分支指针硬重置到指定的提交
+          git reset --hard ${{ github.event.inputs.target_commit }}
+
+          # 强推覆盖远程分支（带 skip ci 防止触发图片工作流）
+          git push origin ${{ github.ref_name }} --force
+
+      - name: Purge CDN Cache for images.json
+        run: |
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@${{ github.ref_name }}/images.json" || true
+          echo "CDN cache purged for images.json"
