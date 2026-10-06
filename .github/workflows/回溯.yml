@@ -1,0 +1,42 @@
+name: Rollback to Previous Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Rollback reason (回溯原因)'
+        required: false
+        default: 'Manual rollback to previous commit'
+
+jobs:
+  revert_commit:
+    name: Revert Last Commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository with Full History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Revert Latest Commit
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "Current HEAD commit:"
+          git log -1 --oneline
+
+          # 撤销最近一次提交的内容，生成一条干净的回溯提交，避免强制推送破坏历史
+          git revert --no-edit HEAD
+
+          # 推送时携带 [skip ci]，避免触发图片裁剪工作流造成二次循环
+          git commit --amend -m "revert: rollback to previous version [skip ci]"
+          git push
+
+      - name: Purge CDN Cache for images.json
+        run: |
+          curl -s "https://purge.jsdelivr.net/gh/${{ github.repository }}@${{ github.ref_name }}/images.json" || true
+          echo "CDN cache purged for images.json"
